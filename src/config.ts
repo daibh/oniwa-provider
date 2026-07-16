@@ -10,18 +10,18 @@ const parseArray = (key: string): string[] => {
   }
 };
 
-const parseModelMapping = (): Record<string, string> => {
-  const val = process.env.MODEL_MAPPING;
+const parseRecord = (key: string): Record<string, string> => {
+  const val = process.env[key];
   if (!val) return {};
   try {
     return JSON.parse(val);
   } catch {
-    const mapping: Record<string, string> = {};
+    const result: Record<string, string> = {};
     val.split(",").forEach((pair) => {
       const [k, v] = pair.split("=").map((s) => s.trim());
-      if (k && v) mapping[k] = v;
+      if (k && v) result[k] = v;
     });
-    return mapping;
+    return result;
   }
 };
 
@@ -35,7 +35,8 @@ export function loadConfig(): Config {
     port: parseInt(process.env.PORT || "8080", 10),
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     openaiBaseUrl: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
-    modelMapping: parseModelMapping(),
+    modelMapping: parseRecord("MODEL_MAPPING"),
+    modelApiKeys: parseRecord("MODEL_API_KEYS"),
     defaultModel: process.env.DEFAULT_MODEL || "gpt-4o",
     maxOutputTokens: parseInt(process.env.MAX_OUTPUT_TOKENS || "16384", 10),
     allowedApiKeys,

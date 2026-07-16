@@ -82,12 +82,24 @@ $env:ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-5-20250514"
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `OPENAI_API_KEY` | — | Your OpenAI API key |
+| `OPENAI_API_KEY` | — | Default OpenAI API key (fallback) |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API |
 | `PORT` | `8080` | Server port |
 | `DEFAULT_MODEL` | `gpt-4o` | Fallback OpenAI model |
 | `MODEL_MAPPING` | `{}` | Anthropic → OpenAI model map |
+| `MODEL_API_KEYS` | `{}` | Per-model API keys (keyed by resolved OpenAI model) |
+| `MAX_OUTPUT_TOKENS` | `16384` | Cap for max_tokens |
 | `ANTHROPIC_AUTH_TOKEN` | — | Require this bearer token from clients |
+
+### Per-model API keys
+
+Use different keys for different models:
+
+```powershell
+$env:MODEL_API_KEYS = '{"gpt-4o":"sk-key-for-gpt4o","gpt-4o-mini":"sk-key-for-mini"}'
+```
+
+Models not listed in `MODEL_API_KEYS` fall back to `OPENAI_API_KEY`.
 
 ## Use with any OpenAI-compatible API
 

@@ -172,6 +172,7 @@ export interface Config {
   openaiApiKey: string;
   openaiBaseUrl: string;
   modelMapping: Record<string, string>;
+  modelApiKeys: Record<string, string>;
   defaultModel: string;
   allowedApiKeys: string[];
   maxOutputTokens: number;

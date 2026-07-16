@@ -61,21 +61,26 @@ app.post("/v1/messages", async (req, res) => {
     }
   }
 
-  if (!config.openaiApiKey) {
-    res.status(500).json({
-      type: "error",
-      error: { type: "api_error", message: "OPENAI_API_KEY not configured on proxy" },
-    });
-    return;
-  }
-
   try {
     const anthropicReq = req.body;
     const openaiReq = anthropicToOpenAI(anthropicReq, config.modelMapping, config.defaultModel, config.maxOutputTokens);
 
+    const resolvedModel = openaiReq.model;
+    const modelKey = config.modelApiKeys[resolvedModel] || config.openaiApiKey;
+    if (!modelKey) {
+      res.status(500).json({
+        type: "error",
+        error: {
+          type: "api_error",
+          message: `No API key configured for model '${resolvedModel}'. Set OPENAI_API_KEY or add it to MODEL_API_KEYS.`,
+        },
+      });
+      return;
+    }
+
     const oaiHeaders: Record<string, string> = {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.openaiApiKey}`,
+      Authorization: `Bearer ${modelKey}`,
     };
 
     if (anthropicReq.stream) {
