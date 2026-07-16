@@ -101,9 +101,13 @@ export interface AnthropicInputJSONDelta {
   partial_json: string;
 }
 
+export type OpenAIContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
+
 export interface OpenAIMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: string | null | OpenAIContentPart[];
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
   name?: string;
@@ -137,6 +141,7 @@ export interface OpenAIRequest {
   top_p?: number;
   stop?: string | string[];
   max_tokens?: number;
+  max_completion_tokens?: number;
   user?: string;
 }
 
@@ -173,7 +178,9 @@ export interface Config {
   openaiBaseUrl: string;
   modelMapping: Record<string, string>;
   modelApiKeys: Record<string, string>;
+  modelContextLimits: Record<string, number>;
   defaultModel: string;
   allowedApiKeys: string[];
   maxOutputTokens: number;
+  maxImageSize: number;
 }

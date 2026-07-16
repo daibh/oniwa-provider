@@ -34,7 +34,7 @@ function extractTextFromContent(content: string | AnthropicContentBlock[]): stri
     .join("");
 }
 
-function anthropicContentToOpenAI(messages: AnthropicMessage[]): OpenAIMessage[] {
+function anthropicContentToOpenAI(messages: AnthropicMessage[], maxImageSize: number): OpenAIMessage[] {
   const result: OpenAIMessage[] = [];
 
   for (const msg of messages) {
@@ -45,37 +45,41 @@ function anthropicContentToOpenAI(messages: AnthropicMessage[]): OpenAIMessage[]
 
     if (msg.role === "user") {
       const textParts: string[] = [];
-      let hasImages = false;
+      const imageParts: { type: "image_url"; image_url: { url: string; detail: "low" } }[] = [];
+      let skippedImages = 0;
 
       for (const block of msg.content) {
         if (block.type === "text") {
           textParts.push(block.text);
         } else if (block.type === "image") {
-          hasImages = true;
-        }
-      }
-
-      if (hasImages) {
-        const contentArr: { type: string; text?: string; image_url?: { url: string } }[] = [];
-        for (const block of msg.content) {
-          if (block.type === "text") {
-            contentArr.push({ type: "text", text: block.text });
-          } else if (block.type === "image") {
-            const img = block as AnthropicImageBlock;
-            contentArr.push({
+          const img = block as AnthropicImageBlock;
+          if (img.source.data.length <= maxImageSize) {
+            imageParts.push({
               type: "image_url",
               image_url: {
                 url: `data:${img.source.media_type};base64,${img.source.data}`,
+                detail: "low",
               },
             });
+          } else {
+            skippedImages++;
           }
         }
-        result.push({
-          role: "user",
-          content: JSON.stringify(contentArr),
-        } as any);
+      }
+
+      if (imageParts.length > 0) {
+        const contentArr: import("./types").OpenAIContentPart[] = [];
+        if (textParts.length > 0) {
+          contentArr.push({ type: "text", text: textParts.join("\n") });
+        }
+        contentArr.push(...imageParts);
+        result.push({ role: "user", content: contentArr });
       } else {
-        result.push({ role: "user", content: textParts.join("\n") || " " });
+        let text = textParts.join("\n") || " ";
+        if (skippedImages > 0) {
+          text += `\n[${skippedImages} image(s) omitted (too large)]`;
+        }
+        result.push({ role: "user", content: text });
       }
     } else if (msg.role === "assistant") {
       const textParts: string[] = [];
@@ -129,11 +133,69 @@ function anthropicContentToOpenAI(messages: AnthropicMessage[]): OpenAIMessage[]
   return result;
 }
 
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 2);
+}
+
+function estimateMessagesTokens(messages: OpenAIMessage[]): number {
+  let total = 0;
+  for (const m of messages) {
+    total += estimateTokens(JSON.stringify(m));
+  }
+  return total;
+}
+
+const MIN_OUTPUT_MARGIN = 4000;
+
+function truncateMessages(
+  messages: OpenAIMessage[],
+  contextLimit: number
+): OpenAIMessage[] {
+  const estimated = messages.map((m) => estimateTokens(JSON.stringify(m)));
+  const totalTokens = estimated.reduce((a, b) => a + b, 0);
+
+  const budget = contextLimit - MIN_OUTPUT_MARGIN;
+  if (totalTokens <= budget) return messages;
+
+  const systemIdx = messages[0]?.role === "system" ? 0 : -1;
+
+  const truncated: OpenAIMessage[] = [];
+  let running = 0;
+
+  if (systemIdx >= 0) {
+    truncated.push(messages[0]);
+    running = estimated[0];
+  }
+
+  for (let i = messages.length - 1; i > systemIdx; i--) {
+    if (running + estimated[i] <= budget) {
+      truncated.splice(systemIdx >= 0 ? 1 : 0, 0, messages[i]);
+      running += estimated[i];
+    }
+  }
+
+  if (truncated.length <= (systemIdx >= 0 ? 1 : 0)) {
+    const keepIdx = systemIdx >= 0 ? systemIdx + 1 : 0;
+    truncated.push(messages[keepIdx]);
+    running += estimated[keepIdx];
+  }
+
+  const dropped = messages.length - truncated.length;
+  if (dropped > 0) {
+    console.log(`[truncate] dropped ${dropped}/${messages.length} messages (est. ${totalTokens} > ${contextLimit}), kept ${running} tokens`);
+  }
+
+  return truncated;
+}
+
 export function anthropicToOpenAI(
   req: AnthropicRequest,
   modelMapping: Record<string, string>,
   defaultModel: string,
-  maxOutputTokens: number = 16384
+  maxOutputTokens: number = 16384,
+  modelContextLimits: Record<string, number> = {},
+  maxImageSize: number = 5242880,
+  tokenParam: "max_completion_tokens" | "max_tokens" = "max_completion_tokens"
 ): OpenAIRequest {
   const oaiMessages: OpenAIMessage[] = [];
 
@@ -144,16 +206,38 @@ export function anthropicToOpenAI(
     oaiMessages.push({ role: "system", content: systemText });
   }
 
-  oaiMessages.push(...anthropicContentToOpenAI(req.messages));
+  oaiMessages.push(...anthropicContentToOpenAI(req.messages, maxImageSize));
+
+  const resolvedModel = mapModel(req.model, modelMapping, defaultModel);
+  const contextLimit = modelContextLimits[resolvedModel] || 128000;
+
+  const truncatedMessages = truncateMessages(oaiMessages, contextLimit);
+  const estimatedPromptTokens = estimateMessagesTokens(truncatedMessages);
+  const remainingForOutput = contextLimit - estimatedPromptTokens - MIN_OUTPUT_MARGIN;
+  const cappedMaxTokens = Math.min(
+    req.max_tokens,
+    maxOutputTokens,
+    Math.max(1, remainingForOutput)
+  );
+
+  const useMaxCompletion = tokenParam === "max_completion_tokens";
 
   const oaiReq: OpenAIRequest = {
-    model: mapModel(req.model, modelMapping, defaultModel),
-    messages: oaiMessages,
-    stream: req.stream,
-    temperature: req.temperature,
-    top_p: req.top_p,
-    max_tokens: Math.min(req.max_tokens, maxOutputTokens),
+    model: resolvedModel,
+    messages: truncatedMessages,
+    stream: useMaxCompletion ? false : req.stream,
   };
+
+  if (useMaxCompletion) {
+    oaiReq.max_completion_tokens = cappedMaxTokens;
+  } else {
+    oaiReq.max_tokens = cappedMaxTokens;
+  }
+
+  if (!useMaxCompletion) {
+    oaiReq.temperature = req.temperature;
+    oaiReq.top_p = req.top_p;
+  }
 
   if (req.stop_sequences && req.stop_sequences.length > 0) {
     oaiReq.stop = req.stop_sequences.length === 1 ? req.stop_sequences[0] : req.stop_sequences;
@@ -196,7 +280,10 @@ export function openaiToAnthropic(
   const content: AnthropicContentBlock[] = [];
 
   if (choice.message.content) {
-    content.push({ type: "text", text: choice.message.content });
+    const text = Array.isArray(choice.message.content)
+      ? choice.message.content.filter((p): p is { type: "text"; text: string } => p.type === "text").map((p) => p.text).join("\n")
+      : choice.message.content;
+    content.push({ type: "text", text });
   }
 
   if (choice.message.tool_calls) {

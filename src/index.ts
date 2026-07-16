@@ -9,26 +9,36 @@ const config = loadConfig();
 
 app.use(express.json({ limit: "50mb" }));
 
+const tokenParamCache = new Map<string, "max_completion_tokens" | "max_tokens">();
+
+function getTokenParam(model: string) {
+  return tokenParamCache.get(model) || "max_completion_tokens";
+}
+
 function getAuthToken(req: express.Request): string | null {
   const xApiKey = req.headers["x-api-key"];
-  if (xApiKey) {
-    return typeof xApiKey === "string" ? xApiKey : xApiKey[0];
-  }
-
+  if (xApiKey) return typeof xApiKey === "string" ? xApiKey : xApiKey[0];
   const auth = req.headers["authorization"];
   if (auth) {
-    const authStr = typeof auth === "string" ? auth : auth[0];
-    const parts = authStr.split(" ");
-    if (parts.length === 2 && parts[0].toLowerCase() === "bearer") {
-      return parts[1];
-    }
+    const parts = (typeof auth === "string" ? auth : auth[0]).split(" ");
+    if (parts.length === 2 && parts[0].toLowerCase() === "bearer") return parts[1];
   }
   return null;
 }
 
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
-});
+function switchTokenParam(req: any, from: string, to: string) {
+  const val = from === "max_completion_tokens" ? req.max_completion_tokens : req.max_tokens;
+  delete req.max_completion_tokens;
+  delete req.max_tokens;
+  if (to === "max_completion_tokens") req.max_completion_tokens = val;
+  else req.max_tokens = val;
+}
+
+function isUnsupportedParamError(status: number, body: string, paramName: string): boolean {
+  return status === 400 && body.includes(paramName) && body.includes("not supported");
+}
+
+app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
 const MODELS = [
   { id: "claude-sonnet-4-6-20250514", object: "model", created: 1747000000, owned_by: "oniwa" },
@@ -36,44 +46,38 @@ const MODELS = [
   { id: "claude-opus-4-5-20250514", object: "model", created: 1747000000, owned_by: "oniwa" },
 ];
 
-app.get("/v1/models", (_req, res) => {
-  res.json({ data: MODELS });
-});
+app.get("/v1/models", (_req, res) => res.json({ data: MODELS }));
 
 app.post("/v1/messages/count_tokens", (req, res) => {
   const text = JSON.stringify(req.body);
-  const charCount = text.length;
-  res.json({
-    input_tokens: Math.ceil(charCount / 4),
-    output_tokens: 0,
-  });
+  res.json({ input_tokens: Math.ceil(text.length / 4), output_tokens: 0 });
 });
 
 app.post("/v1/messages", async (req, res) => {
   const token = getAuthToken(req);
   if (config.allowedApiKeys.length > 0) {
     if (!token || !config.allowedApiKeys.includes(token)) {
-      res.status(401).json({
-        type: "error",
-        error: { type: "authentication_error", message: "Invalid API key" },
-      });
+      res.status(401).json({ type: "error", error: { type: "authentication_error", message: "Invalid API key" } });
       return;
     }
   }
 
   try {
     const anthropicReq = req.body;
-    const openaiReq = anthropicToOpenAI(anthropicReq, config.modelMapping, config.defaultModel, config.maxOutputTokens);
+    let tokenParam = getTokenParam(anthropicReq.model);
 
-    const resolvedModel = openaiReq.model;
-    const modelKey = config.modelApiKeys[resolvedModel] || config.openaiApiKey;
+    let openaiReq = anthropicToOpenAI(
+      anthropicReq, config.modelMapping, config.defaultModel,
+      config.maxOutputTokens, config.modelContextLimits,
+      config.maxImageSize, tokenParam
+    );
+
+    const finalModel = openaiReq.model;
+    const modelKey = config.modelApiKeys[finalModel] || config.openaiApiKey;
     if (!modelKey) {
       res.status(500).json({
         type: "error",
-        error: {
-          type: "api_error",
-          message: `No API key configured for model '${resolvedModel}'. Set OPENAI_API_KEY or add it to MODEL_API_KEYS.`,
-        },
+        error: { type: "api_error", message: `No API key for model '${finalModel}'` },
       });
       return;
     }
@@ -83,25 +87,43 @@ app.post("/v1/messages", async (req, res) => {
       Authorization: `Bearer ${modelKey}`,
     };
 
+    const url = `${config.openaiBaseUrl}/chat/completions`;
+    const body = JSON.stringify(openaiReq);
+
     if (anthropicReq.stream) {
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
 
-      const oaiRes = await fetch(`${config.openaiBaseUrl}/chat/completions`, {
-        method: "POST",
-        headers: oaiHeaders,
-        body: JSON.stringify(openaiReq),
-      });
+      let oaiRes = await fetch(url, { method: "POST", headers: oaiHeaders, body });
 
       if (!oaiRes.ok) {
         const errText = await oaiRes.text();
-        res.write(`data: ${JSON.stringify({
-          type: "error",
-          error: { type: "api_error", message: errText },
-        })}\n\n`);
-        res.end();
-        return;
+        const altParam = tokenParam === "max_completion_tokens" ? "max_tokens" : "max_completion_tokens";
+        if (isUnsupportedParamError(oaiRes.status, errText, tokenParam)) {
+          tokenParamCache.set(anthropicReq.model, altParam);
+          tokenParam = altParam;
+          openaiReq = anthropicToOpenAI(
+            anthropicReq, config.modelMapping, config.defaultModel,
+            config.maxOutputTokens, config.modelContextLimits,
+            config.maxImageSize, tokenParam
+          );
+          oaiRes = await fetch(url, {
+            method: "POST",
+            headers: oaiHeaders,
+            body: JSON.stringify(openaiReq),
+          });
+          if (!oaiRes.ok) {
+            const retryErr = await oaiRes.text();
+            res.write(`data: ${JSON.stringify({ type: "error", error: { type: "api_error", message: retryErr } })}\n\n`);
+            res.end();
+            return;
+          }
+        } else {
+          res.write(`data: ${JSON.stringify({ type: "error", error: { type: "api_error", message: errText } })}\n\n`);
+          res.end();
+          return;
+        }
       }
 
       const reader = oaiRes.body?.getReader();
@@ -115,7 +137,6 @@ app.post("/v1/messages", async (req, res) => {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop() || "";
@@ -124,55 +145,64 @@ app.post("/v1/messages", async (req, res) => {
             const trimmed = line.trim();
             if (!trimmed || !trimmed.startsWith("data: ")) continue;
             const data = trimmed.slice(6);
-
             if (data === "[DONE]") {
               res.write(`data: ${JSON.stringify({ type: "message_stop" })}\n\n`);
               res.write("data: [DONE]\n\n");
               continue;
             }
-
             try {
               const chunk = JSON.parse(data);
               const events = openaiChunkToAnthropicEvents(chunk, anthropicReq.model, state);
-              for (const event of events) {
-                res.write(`data: ${JSON.stringify(event)}\n\n`);
-              }
-            } catch {
-              // skip
-            }
+              for (const event of events) res.write(`data: ${JSON.stringify(event)}\n\n`);
+            } catch { /* skip */ }
           }
         }
-      } finally {
-        reader.releaseLock();
-      }
+      } finally { reader.releaseLock(); }
 
-      if (!state.messageStarted) {
-        res.write(`data: ${JSON.stringify({ type: "message_stop" })}\n\n`);
-      }
+      if (!state.messageStarted) res.write(`data: ${JSON.stringify({ type: "message_stop" })}\n\n`);
       res.write("data: [DONE]\n\n");
       res.end();
     } else {
-      const oaiRes = await fetch(`${config.openaiBaseUrl}/chat/completions`, {
-        method: "POST",
-        headers: oaiHeaders,
-        body: JSON.stringify(openaiReq),
-      });
+      let oaiRes = await fetch(url, { method: "POST", headers: oaiHeaders, body });
 
       if (!oaiRes.ok) {
         const errText = await oaiRes.text();
-        let errBody: { error?: { message?: string }; message?: string };
-        try { errBody = JSON.parse(errText); } catch { errBody = { message: errText }; }
-        res.status(oaiRes.status).json({
-          type: "error",
-          error: {
-            type: "api_error",
-            message: errBody.error?.message || errBody.message || "OpenAI API error",
-          },
-        });
-        return;
+        const altParam = tokenParam === "max_completion_tokens" ? "max_tokens" : "max_completion_tokens";
+        if (isUnsupportedParamError(oaiRes.status, errText, tokenParam)) {
+          tokenParamCache.set(anthropicReq.model, altParam);
+          tokenParam = altParam;
+          openaiReq = anthropicToOpenAI(
+            anthropicReq, config.modelMapping, config.defaultModel,
+            config.maxOutputTokens, config.modelContextLimits,
+            config.maxImageSize, tokenParam
+          );
+          oaiRes = await fetch(url, {
+            method: "POST",
+            headers: oaiHeaders,
+            body: JSON.stringify(openaiReq),
+          });
+          if (!oaiRes.ok) {
+            const retryErr = await oaiRes.text();
+            let errBody: any;
+            try { errBody = JSON.parse(retryErr); } catch { errBody = { message: retryErr }; }
+            res.status(oaiRes.status).json({
+              type: "error",
+              error: { type: "api_error", message: errBody.error?.message || errBody.message || retryErr },
+            });
+            return;
+          }
+        } else {
+          let errBody: any;
+          try { errBody = JSON.parse(errText); } catch { errBody = { message: errText }; }
+          res.status(oaiRes.status).json({
+            type: "error",
+            error: { type: "api_error", message: errBody.error?.message || errBody.message || errText },
+          });
+          return;
+        }
       }
 
-      const oaiData = (await oaiRes.json()) as OpenAIResponse;
+      const oaiData: OpenAIResponse = JSON.parse(await oaiRes.text());
       const anthropicRes = openaiToAnthropic(oaiData, anthropicReq.model);
       res.json(anthropicRes);
     }
@@ -180,25 +210,21 @@ app.post("/v1/messages", async (req, res) => {
     console.error("Error:", err);
     res.status(500).json({
       type: "error",
-      error: {
-        type: "server_error",
-        message: err instanceof Error ? err.message : "Unknown error",
-      },
+      error: { type: "server_error", message: err instanceof Error ? err.message : "Unknown error" },
     });
   }
 });
 
 app.use((_req, res) => {
-  res.status(404).json({
-    type: "error",
-    error: { type: "not_found", message: "Not found" },
-  });
+  res.status(404).json({ type: "error", error: { type: "not_found", message: "Not found" } });
 });
 
 app.listen(config.port, () => {
   console.log(`oNiwa Provider running on port ${config.port}`);
-  console.log(`Default OpenAI model: ${config.defaultModel}`);
+  console.log(`Default model: ${config.defaultModel}`);
   console.log(`OpenAI API URL: ${config.openaiBaseUrl}`);
   console.log(`Model mapping: ${JSON.stringify(config.modelMapping)}`);
+  console.log(`Context limits: ${JSON.stringify(config.modelContextLimits)}`);
+  console.log(`Max output tokens: ${config.maxOutputTokens}`);
   console.log(`Allowed API keys: ${config.allowedApiKeys.length > 0 ? config.allowedApiKeys.length + " configured" : "any key accepted"}`);
 });

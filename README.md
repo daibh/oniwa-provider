@@ -88,7 +88,9 @@ $env:ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-5-20250514"
 | `DEFAULT_MODEL` | `gpt-4o` | Fallback OpenAI model |
 | `MODEL_MAPPING` | `{}` | Anthropic → OpenAI model map |
 | `MODEL_API_KEYS` | `{}` | Per-model API keys (keyed by resolved OpenAI model) |
-| `MAX_OUTPUT_TOKENS` | `16384` | Cap for max_tokens |
+| `MODEL_CONTEXT_LIMITS` | `{}` | Per-model context windows for auto-capping max_tokens |
+| `MAX_OUTPUT_TOKENS` | `16384` | Hard cap for max_tokens |
+| `MAX_IMAGE_SIZE` | `5242880` | Max base64 image size in bytes (0 = block all) |
 | `ANTHROPIC_AUTH_TOKEN` | — | Require this bearer token from clients |
 
 ### Per-model API keys
