@@ -17,13 +17,9 @@ import {
   OpenAIStreamChunk,
 } from "./types";
 
-function mapModel(anthropicModel: string, modelMapping: Record<string, string>, defaultModel: string): string {
+function mapModel(anthropicModel: string, modelMapping: Record<string, string>): string {
   if (modelMapping[anthropicModel]) return modelMapping[anthropicModel];
-  const lower = anthropicModel.toLowerCase();
-  if (lower.includes("sonnet") || lower.includes("opus") || lower.includes("haiku")) {
-    return defaultModel;
-  }
-  return defaultModel;
+  return anthropicModel;
 }
 
 function extractTextFromContent(content: string | AnthropicContentBlock[]): string {
@@ -191,7 +187,6 @@ function truncateMessages(
 export function anthropicToOpenAI(
   req: AnthropicRequest,
   modelMapping: Record<string, string>,
-  defaultModel: string,
   maxOutputTokens: number = 16384,
   modelContextLimits: Record<string, number> = {},
   maxImageSize: number = 5242880,
@@ -208,7 +203,7 @@ export function anthropicToOpenAI(
 
   oaiMessages.push(...anthropicContentToOpenAI(req.messages, maxImageSize));
 
-  const resolvedModel = mapModel(req.model, modelMapping, defaultModel);
+  const resolvedModel = mapModel(req.model, modelMapping);
   const contextLimit = modelContextLimits[resolvedModel] || 128000;
 
   const truncatedMessages = truncateMessages(oaiMessages, contextLimit);
@@ -225,7 +220,7 @@ export function anthropicToOpenAI(
   const oaiReq: OpenAIRequest = {
     model: resolvedModel,
     messages: truncatedMessages,
-    stream: useMaxCompletion ? false : req.stream,
+    stream: req.stream,
   };
 
   if (useMaxCompletion) {
@@ -241,6 +236,10 @@ export function anthropicToOpenAI(
 
   if (req.stop_sequences && req.stop_sequences.length > 0) {
     oaiReq.stop = req.stop_sequences.length === 1 ? req.stop_sequences[0] : req.stop_sequences;
+  }
+
+  if (req.stream) {
+    oaiReq.stream_options = { include_usage: true };
   }
 
   if (req.metadata?.user_id) {

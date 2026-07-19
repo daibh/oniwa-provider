@@ -6,9 +6,14 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "build:lambda": "esbuild src/lambda.ts --bundle --platform=node --target=node20 --outfile=dist/lambda.js --external:@aws-sdk/*",
+    "package:lambda": "npm run build:lambda && cd dist && zip -r ../deploy.zip lambda.js"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.1090.0",
+    "@aws-sdk/client-s3": "^3.1090.0",
+    "@vendia/serverless-express": "^4.12.6",
     "dotenv": "^17.4.2",
     "express": "^4.21.0"
   },
@@ -16,6 +21,7 @@
     "@types/dotenv": "^6.1.1",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
+    "esbuild": "^0.19.12",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }

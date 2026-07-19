@@ -137,6 +137,7 @@ export interface OpenAIRequest {
   tools?: OpenAITool[];
   tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
   stream?: boolean;
+  stream_options?: { include_usage: boolean };
   temperature?: number;
   top_p?: number;
   stop?: string | string[];
@@ -158,6 +159,7 @@ export interface OpenAIResponse {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    prompt_tokens_details?: { cached_tokens?: number };
   };
 }
 
@@ -170,17 +172,97 @@ export interface OpenAIStreamChunk {
     delta: Partial<OpenAIMessage>;
     finish_reason: string | null;
   }[];
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
+}
+
+export type ProviderFormat = "openai" | "anthropic";
+
+export interface ProviderConfig {
+  baseUrl: string;
+  apiKey: string;
+  format: ProviderFormat;
+}
+
+export interface UserToken {
+  id: string;
+  prefix: string;
+  hashedToken: string;
+  createdAt: string;
+  revoked?: boolean;
+}
+
+export interface UserProfile {
+  id: string;
+  name: string;
+  active: boolean;
+  tokens: UserToken[];
+  createdAt: string;
+  migrated?: boolean;
+}
+
+export interface PricingConfig {
+  [model: string]: {
+    input: number;
+    output: number;
+    cachedInput: number;
+  };
+}
+
+export interface UsageRecord {
+  type: "usage";
+  requestId: string;
+  userId: string;
+  model: string;
+  provider: string;
+  timestamp: string;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  streaming: boolean;
 }
 
 export interface Config {
   port: number;
-  openaiApiKey: string;
-  openaiBaseUrl: string;
   modelMapping: Record<string, string>;
   modelApiKeys: Record<string, string>;
   modelContextLimits: Record<string, number>;
-  defaultModel: string;
-  allowedApiKeys: string[];
   maxOutputTokens: number;
   maxImageSize: number;
+  providers: Record<string, ProviderConfig>;
+  modelRouting: Record<string, string>;
+  adminApiKey: string;
+  s3Bucket: string;
+  awsRegion: string;
+  logsGroupName: string;
+}
+
+export interface UsageQuery {
+  period?: "day" | "week" | "month" | "quarter" | "year";
+  from?: string;
+  to?: string;
+}
+
+export interface ModelMetrics {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  requests: number;
+  cost: number;
+}
+
+export interface MetricsResponse {
+  period: string;
+  start: string;
+  end: string;
+  totalRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCachedInputTokens: number;
+  byModel: Record<string, ModelMetrics>;
+  totalCost: number;
 }
